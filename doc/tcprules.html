@@ -1,0 +1,143 @@
+<html>
+<body>
+<a href="../djb.html">D. J. Bernstein</a>
+<br><a href="../tcpip.html">TCP/IP</a>
+<br><a href="../ucspi-tcp.html">ucspi-tcp</a>
+<h1>The <tt>tcprules</tt> program</h1>
+<tt>tcprules</tt> compiles rules for
+<a href="tcpserver.html"><tt>tcpserver</tt></a>.
+<h2>Interface</h2>
+<pre>
+     tcprules <i>cdb</i> <i>tmp</i>
+</pre>
+<p>
+<tt>tcpserver</tt> optionally follows rules
+to decide whether a TCP connection is acceptable.
+For example, the rule
+<pre>
+     18.23.0.32:deny
+</pre>
+prohibits connections from IP address 18.23.0.32.
+<p>
+<tt>tcprules</tt> reads rules from its standard input
+and writes them into <tt><i>cdb</i></tt>
+in a binary format suited for quick access by <tt>tcpserver</tt>.
+<p>
+<tt>tcprules</tt> can be used while <tt>tcpserver</tt> is running.
+It ensures that <tt><i>cdb</i></tt> is updated atomically.
+It does this by first writing the rules to <tt><i>tmp</i></tt>
+and then moving <tt><i>tmp</i></tt> on top of <tt><i>cdb</i></tt>.
+If <tt><i>tmp</i></tt> already exists, it is destroyed.
+The directories containing <tt><i>cdb</i></tt> and <tt><i>tmp</i></tt>
+must be writable to <tt>tcprules</tt>;
+they must also be on the same filesystem.
+<p>
+If there is a problem with the input or with <tt><i>tmp</i></tt>,
+<tt>tcprules</tt> complains and leaves <tt><i>cdb</i></tt> alone.
+<p>
+The binary <tt><i>cdb</i></tt> format is portable across machines.
+<h2>Rule format</h2>
+A rule is one line.
+A file containing rules may also contain comments:
+lines beginning with <tt>#</tt> are ignored.
+<p>
+Each rule contains an <b>address</b>,
+a colon, and a list of <b>instructions</b>,
+with no extra spaces.
+When <tt>tcpserver</tt> receives a connection from that address,
+it follows the instructions.
+<h2>Addresses</h2>
+<tt>tcpserver</tt> looks for rules with various addresses:
+<ol>
+<li><tt>$TCPREMOTEINFO@$TCPREMOTEIP</tt>,
+if <tt>$TCPREMOTEINFO</tt> is set;
+<li><tt>$TCPREMOTEINFO@=$TCPREMOTEHOST</tt>,
+if <tt>$TCPREMOTEINFO</tt> is set
+and <tt>$TCPREMOTEHOST</tt> is set;
+<li><tt>$TCPREMOTEIP</tt>;
+<li><tt>=$TCPREMOTEHOST</tt>,
+if <tt>$TCPREMOTEHOST</tt> is set;
+<li>shorter and shorter prefixes of <tt>$TCPREMOTEIP</tt>
+ending with a dot;
+<li>shorter and shorter suffixes of <tt>$TCPREMOTEHOST</tt>
+starting with a dot,
+preceded by <tt>=</tt>,
+if <tt>$TCPREMOTEHOST</tt> is set;
+<li><tt>=</tt>,
+if <tt>$TCPREMOTEHOST</tt> is set;
+and finally
+<li>the empty string.
+</ol>
+<tt>tcpserver</tt> uses the first rule it finds.
+You should use the <tt>-p</tt> option to <tt>tcpserver</tt>
+if you rely on <tt>$TCPREMOTEHOST</tt> here.
+<p>
+For example, here are some rules:
+<pre>
+     joe@127.0.0.1:first
+     18.23.0.32:second
+     :third
+     127.:fourth
+</pre>
+If <tt>$TCPREMOTEIP</tt> is <tt>10.119.75.38</tt>,
+<tt>tcpserver</tt> will follow the <tt>third</tt> instructions.
+<p>
+If <tt>$TCPREMOTEIP</tt> is <tt>18.23.0.32</tt>,
+<tt>tcpserver</tt> will follow the <tt>second</tt> instructions.
+<p>
+If <tt>$TCPREMOTEIP</tt> is <tt>127.0.0.1</tt>
+and <tt>$TCPREMOTEINFO</tt> is <tt>bill</tt>,
+<tt>tcpserver</tt> will follow the <tt>fourth</tt> instructions.
+<p>
+If <tt>$TCPREMOTEIP</tt> is <tt>127.0.0.1</tt>
+and <tt>$TCPREMOTEINFO</tt> is <tt>joe</tt>,
+<tt>tcpserver</tt> will follow the <tt>first</tt> instructions.
+<p>
+You can use
+<a href="tcprulescheck.html"><tt>tcprulescheck</tt></a>
+to see how <tt>tcpserver</tt> will interpret rules in <tt><i>cdb</i></tt>.
+<h2>Address ranges</h2>
+<tt>tcprules</tt> treats
+<tt>1.2.3.37-53:ins</tt>
+as an abbreviation for the rules
+<tt>1.2.3.37:ins</tt>,
+<tt>1.2.3.38:ins</tt>,
+and so on up through
+<tt>1.2.3.53:ins</tt>.
+Similarly,
+<tt>10.2-3.:ins</tt>
+is an abbreviation for
+<tt>10.2.:ins</tt> and
+<tt>10.3.:ins</tt>.
+<h2>Instructions</h2>
+The instructions in a rule must begin with either
+<tt>allow</tt> or <tt>deny</tt>.
+<tt>deny</tt> tells <tt>tcpserver</tt>
+to drop the connection without running anything.
+For example, the rule
+<pre>
+     :deny
+</pre>
+tells <tt>tcpserver</tt> to drop all connections
+that aren't handled by more specific rules.
+<p>
+The instructions may continue with some environment variables,
+in the form <tt>,<i>var</i>="<i>x</i>"</tt>.
+<tt>tcpserver</tt> adds an environment variable <tt>$<i>var</i></tt>
+with value <tt><i>x</i></tt>.
+For example,
+<pre>
+     10.0.:allow,RELAYCLIENT="@fix.me"
+</pre>
+adds an environment variable <tt>$RELAYCLIENT</tt>
+with value <tt>@fix.me</tt>.
+The quotes may be replaced by any repeated character:
+<pre>
+     10.0.:allow,RELAYCLIENT=/@fix.me/
+</pre>
+Any number of variables may be listed:
+<pre>
+     127.0.0.1:allow,RELAYCLIENT="",TCPLOCALHOST="movie.edu"
+</pre>
+</body>
+</html>
