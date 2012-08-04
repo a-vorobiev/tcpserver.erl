@@ -1,5 +1,5 @@
 -module(tcprules).
--export([parse_file/1, check_full_rules/2, check_network_rules/3, check_name_rules/3]).
+-export([parse_file/1, check_full_rules/2, check_network_rules/3, check_name_rules/3, check_empty_rules/1]).
 
 parse_file(RulesFile) ->
 	case file:open(RulesFile, [read]) of
@@ -26,7 +26,7 @@ parse(Line, Count, Acc) ->
 		{match, _} ->
 			Acc;
 		nomatch ->
-%			io:format("Parsing line ~p:~p~n", [Count, Line]),
+			io:format("Parsing line ~p:~p~n", [Count, Line]),
 			case re:run(Line, "^(.*):(allow|deny)([^#]*)[#|\n].*") of
 				{match, Match} ->
 %					io:format("Rule: ~p~n", [Match]),
@@ -38,7 +38,7 @@ parse(Line, Count, Acc) ->
 					[Address, Type, Environment] = Fields,
 					Acc ++ [{rule, list_to_atom(Type), Address, string:tokens(string:strip(Environment), ",")}];
 				_ ->
-					io:format("Unknown rule in Line ~p: ~p~n", [Count, Line]),
+%					io:format("Unknown rule in Line ~p: ~p~n", [Count, Line]),
 					Acc
 			end
 	end.
@@ -47,13 +47,13 @@ parse(Line, Count, Acc) ->
 check_full_rules(undefined, _) ->
 	not_found;
 
-check_full_rules(Address, []) ->
+check_full_rules(_, []) ->
 	not_found;
 
 check_full_rules(Address, [Head|Tail]) ->
 %	io:format("check_host_rules called for ~p~n", [Head]),
 	case Head of
-		{rule, Result, Address, _} ->
+		{rule, _, Address, _} ->
 			Head;
 		_ ->
 		check_full_rules(Address, Tail)
@@ -65,19 +65,19 @@ check_network_rules(undefined, _, _) ->
 check_network_rules(Address, N, Rules) ->
 	check_network_rules(Address, N, Rules, Rules).
 
-check_network_rules(Address, N, [], Rules) when N =< 1 ->
+check_network_rules(_, N, [], _) when N =< 1 ->
 	not_found;
 
 check_network_rules(Address, N, [], Rules) ->
-	io:format("check_network_rules called for ~p(~p)~n", [Address, N]),
+%	io:format("check_network_rules called for ~p(~p)~n", [Address, N]),
 	check_network_rules(lists:sublist(Address, N - 1), N - 1, Rules, Rules);
 
 check_network_rules(Address, N, [Head|Tail], Rules) ->
-	io:format("check_network_rules called for ~p(~p)~n", [Address, N]),
+%	io:format("check_network_rules called for ~p(~p)~n", [Address, N]),
 	AddressPattern = string:join(Address,".") ++ [$.],
-	io:format("~p~n", [AddressPattern]),
+%	io:format("~p~n", [AddressPattern]),
 	case Head of
-		{rule, Result, AddressPattern, _} ->
+		{rule, _, AddressPattern, _} ->
 			Head;
 		_ ->
 		check_network_rules(Address, N, Tail, Rules)
@@ -89,22 +89,22 @@ check_name_rules(undefined, _, _) ->
 check_name_rules(Address, N, Rules) ->
 	check_name_rules(Address, N, Rules, Rules).
 
-check_name_rules(Address, N, [], Rules) when N =< 1 ->
+check_name_rules(_, N, [], _) when N =< 1 ->
 	not_found;
 
 check_name_rules(Address, N, [], Rules) ->
 	check_name_rules(lists:nthtail(1, Address), N - 1, Rules, Rules);
 
 check_name_rules(Address, N, [Head|Tail], Rules) ->
-	io:format("check_name_rules called for ~p(~p)~n", [Address, N]),
+%	io:format("check_name_rules called for ~p(~p)~n", [Address, N]),
 	AddressPattern = [$=,$.] ++ string:join(Address,"."),
 %	io:format("~p~n", [AddressPattern]),
 	case Head of
-		{rule, Result, AddressPattern, _} ->
+		{rule, _, AddressPattern, _} ->
 			Head;
 		_ ->
 		check_name_rules(Address, N, Tail, Rules)
 	end.
 
-check_empty_rules() ->
-	allow.
+check_empty_rules(Rules) ->
+	check_full_rules("", Rules).

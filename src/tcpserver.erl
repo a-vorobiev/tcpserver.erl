@@ -2,8 +2,6 @@
 -export([main/1]).
 -include("tcpserver.hrl").
 
--define(MAX_CON, 3).
-
 usage() ->
 	?LOG("Usage: tcpserver [-1UXpPhHrRoOdDqQv] [-x <rules.cdb>] [-B <banner>] [-c <limit>] [-b <backlog>] [-g <gid>] [-u <uid>] [-l <localname>] [-t <timeout>] <host> <port> <program>~n"),
 	halt(1).
@@ -145,7 +143,7 @@ acceptor(LSocket, S) ->
 		{ok, Socket} ->
 			ConnectionInfo = get_connection_info(Socket, S),
 			case check_rules(S, ConnectionInfo) of
-				allow ->
+				{allow, Env} ->
 					io:format("ConnectionInfo = ~p~n", [ConnectionInfo]),
 					case proplists:get_value(ip_dontroute, S#state.options) of
 						true ->
@@ -155,7 +153,7 @@ acceptor(LSocket, S) ->
 							ip_as_is
 					end,
 
-					Pid = spawn(fun() -> handle_connection(Socket, S) end),
+					Pid = spawn(fun() -> handle_connection(Socket, S, Env) end),
 					gen_tcp:controlling_process(Socket, Pid),
 					Pid ! go,
 					acceptor(LSocket, S);
@@ -195,14 +193,14 @@ check_rules(S, C) ->
 		{rule, deny, _, _} ->
 			deny;
 		{rule, allow, _, Environment} ->
-			allow;
+			{allow, Environment};
 		not_found ->
 			io:format("full rule not found for ~p~n", [RemoteIP]),
 			case tcprules:check_full_rules(C#connection.remote#peer.host, S#state.rules) of
 				{rule, deny, _, _} ->
 					deny;
 				{rule, allow, _, Environment} ->
-					allow;
+					{allow, Environment};
 				not_found ->
 					io:format("full rule not found for ~p~n", [C#connection.remote#peer.host]),
 					IP_Octets = lists:sublist(string:tokens(RemoteIP, "."), 3),
@@ -210,7 +208,7 @@ check_rules(S, C) ->
 						{rule, deny, _, _} ->
 							deny;
 						{rule, allow, _, Environment} ->
-							allow;
+							{allow, Environment};
 						not_found ->
 							io:format("network rule not found for ~p~n", [C#connection.remote#peer.host]),
 							{Domain, Length} = get_domain(C#connection.remote#peer.host),
@@ -219,10 +217,15 @@ check_rules(S, C) ->
 								{rule, deny, _, _} ->
 									deny;
 								{rule, allow, _, Environment} ->
-									allow;
+									{allow, Environment};
 								not_found ->
-									io:format("name rule not found for ~p~n", [C#connection.remote#peer.host]);
-									% find empty rule here
+									io:format("name rule not found for ~p~n", [C#connection.remote#peer.host]),
+									case tcprules:check_empty_rules(S#state.rules) of
+										{rule, allow, _, Environment} ->
+											{allow, Environment};
+										_ ->
+											deny
+									end;
 								Val ->
 									io:format("Unknown rule result: ~p~n", [Val])
 							end;
@@ -234,8 +237,7 @@ check_rules(S, C) ->
 			end;
 		Val ->
 			io:format("Unknown rule result: ~p~n", [Val])
-	end,
-	allow.
+	end.
 
 get_domain(undefined) ->
 	{undefined, 0};
@@ -325,22 +327,24 @@ get_connection_info(Socket, S) ->
 
 
 
-search_ip(IP, []) ->
+search_ip(_, []) ->
 	false;
 
-search_ip(IP, [IP|Tail]) ->
+search_ip(IP, [IP|_]) ->
 	true;
 
 search_ip(IP, [IP|Tail]) ->
 	search_ip(IP, Tail).
 
 
-handle_connection(Socket, S) ->
+handle_connection(Socket, S, Env) ->
 	receive
 		go ->
+			EnvVars = [ extract_var(E) || E <- Env],
+			io:format("Env: ~p~n", [EnvVars]),
 			inet:setopts(Socket, [{active, true}]),
 			process_flag(trap_exit, true),
-			Port = open_port({spawn, proplists:get_value(program, S#state.options)}, [stream, exit_status, binary]),
+			Port = open_port({spawn, proplists:get_value(program, S#state.options)}, [stream, exit_status, binary, {env, EnvVars}]),
 			?LOG("Going into connection loop~n"),
 			Banner = proplists:get_value(banner, S#state.options),
 			case Banner of
@@ -353,6 +357,10 @@ handle_connection(Socket, S) ->
 %%	after XXX ->
 %%		timeout
 	end.
+
+extract_var(Str) ->
+	[Var, Val] = string:tokens(Str, "="),
+	{Var, Val}.
 
 connection_loop(Socket, Port, S) ->
 	receive
