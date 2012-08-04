@@ -10,11 +10,7 @@ main([]) ->
 	usage();
 
 main(RawArgs) ->
-	{Options, Args} = parse_args(RawArgs),
-	?LOG("Options: ~p~nNon-options: ~p~n", [Options, Args]),
-	?LOG("~p~n", [proplists:get_keys(Options)]),
-	?LOG("~p~n", [proplists:get_value(host, Options)]),
-	?LOG("~p~n", [proplists:get_value(port, Options)]),
+	{Options, _} = parse_args(RawArgs),
 
 	% check if all required options are present
 	[
@@ -42,8 +38,19 @@ main(RawArgs) ->
 			Rules = []
 	end,
 
+	Verbosity = case proplists:get_value(quiet, Options) of
+		true ->
+			0;
+		_ ->
+			case proplists:get_value(verbose, Options) of
+				true ->
+					2;
+				_ ->
+					1
+			end
+	end,
 
-	start(#state{options = Options, args = Args, rules = Rules}).
+	start(#state{options = Options, verbosity = Verbosity, rules = Rules}).
 
 
 parse_args(RawArgs) ->
@@ -78,65 +85,56 @@ start(S) ->
 			TCPOptions = ?TCP_OPTIONS ++ [{ip, IP}, {backlog, Backlog}]
 	end,
 
+
+
 	case gen_tcp:listen(Port, TCPOptions) of
 		{ok, LSocket} ->
-			register(connection_controller, spawn(fun() -> connection_counter(0, Limit, 0) end)),
+			register(connection_controller, spawn(fun() -> connection_counter(S, 0, Limit, 0) end)),
 			register(acceptor, spawn(fun() -> acceptor(LSocket, S) end)),
 			sleep(infinity);
-%			acceptor(LSocket, S);
 		{error, eaddrnotavail} ->
-			?LOG("Cannot listen on ~p~n", [proplists:get_value(host, S#state.options)]),
+			log(S#state.verbosity, ?ERROR, "Cannot listen on ~p", [proplists:get_value(host, S#state.options)]),
 			halt(1);
 		{error, eacces} ->
-			?LOG("No premissions to listen on port ~p on ~p~n", [proplists:get_value(port, S#state.options),
-										  proplists:get_value(host, S#state.options)]),
-			halt(1)
-%%		{Msg} ->
-%%			log Msg
+			log(S#state.verbosity, ?ERROR, "No premission to listen on port ~p on ~p", [proplists:get_value(port, S#state.options),
+												    proplists:get_value(host, S#state.options)]),
+			halt(1);
+		{ListenErrMsg} ->
+			log(S#state.verbosity, ?ERROR, "Error while listening on ~p:~p (~p)", [IP, Port, ListenErrMsg])
 	end.
 
-connection_counter(Count, Max, Pending) ->
+connection_counter(S, Count, Max, Pending) ->
 	receive
 		{From, may_i} ->
-			?LOG("~p asks for accept permission; connection count: ~p~n", [From, Count]),
-			verify_connection(From, Count, Max, Pending);
+			log(S#state.verbosity, ?INFO, "~p asks for accept permission; connection count: ~p", [From, Count]),
+			verify_connection(S, From, Count, Max, Pending);
 		{_, done} ->
-			?LOG("Connection closed, count ~p~n", [Count - 1]),
-			?LOG("Here we can check pending accepts and send them permission~n"),
 			case Pending of
 				0 ->
-					connection_counter(Count - 1, Max, Pending);
+					connection_counter(S, Count - 1, Max, Pending);
 				Val ->
 					acceptor ! permission,
-					?LOG("Permission sent to acceptor ~p~n", [acceptor]),
-					connection_counter(Count, Max, Val - 1)
+					connection_counter(S, Count, Max, Val - 1)
 			end
 	end.
 
-verify_connection(From, Max, Max, Pending) ->
+verify_connection(S, From, Max, Max, Pending) ->
 	From ! overloaded,
-	?LOG("~p will be added to pending list~n", [From]),
-	connection_counter(Max, Max, Pending + 1);
+	connection_counter(S, Max, Max, Pending + 1);
 
-verify_connection(From, Count, Max, Pending) ->
+verify_connection(S, From, Count, Max, Pending) ->
 	From ! ok,
-	connection_counter(Count + 1, Max, Pending).
+	connection_counter(S, Count + 1, Max, Pending).
 
 acceptor(LSocket, S) ->
-
-%%	ask for new rules
-%%	get answer and new rules if needed
 
 	connection_controller ! {self(), may_i},
 	receive
 		ok ->
-			?LOG("Recieved OK from controller, going on~n");
+			go_on;
 		overloaded ->
-			?LOG("~p: we are overloaded, have to wait for permission~n", [self()]),
-			% receive here??
 			receive permission ->
-				?LOG("Got permission~n"),
-				ok
+				go_on
 			end
 	end,
 	case gen_tcp:accept(LSocket) of
@@ -144,10 +142,8 @@ acceptor(LSocket, S) ->
 			ConnectionInfo = get_connection_info(Socket, S),
 			case check_rules(S, ConnectionInfo) of
 				{allow, Env} ->
-					io:format("ConnectionInfo = ~p~n", [ConnectionInfo]),
 					case proplists:get_value(ip_dontroute, S#state.options) of
 						true ->
-							io:format("IP settings overrided~n"),
 							inet:setopts(Socket, [{dontroute, true}]);
 						_ ->
 							ip_as_is
@@ -186,23 +182,19 @@ acceptor(LSocket, S) ->
 %%%
 
 check_rules(S, C) ->
-	io:format("ConnectionInfo = ~p~n", [C]),
 	RemoteIP = inet_parse:ntoa(C#connection.remote#peer.ip),
-%	io:format("RemoteIP = ~p~n", [RemoteIP]),
 	case tcprules:check_full_rules(RemoteIP, S#state.rules) of
 		{rule, deny, _, _} ->
 			deny;
 		{rule, allow, _, Environment} ->
 			{allow, Environment};
 		not_found ->
-			io:format("full rule not found for ~p~n", [RemoteIP]),
 			case tcprules:check_full_rules(C#connection.remote#peer.host, S#state.rules) of
 				{rule, deny, _, _} ->
 					deny;
 				{rule, allow, _, Environment} ->
 					{allow, Environment};
 				not_found ->
-					io:format("full rule not found for ~p~n", [C#connection.remote#peer.host]),
 					IP_Octets = lists:sublist(string:tokens(RemoteIP, "."), 3),
 					case tcprules:check_network_rules(IP_Octets, 3, S#state.rules) of
 						{rule, deny, _, _} ->
@@ -210,16 +202,13 @@ check_rules(S, C) ->
 						{rule, allow, _, Environment} ->
 							{allow, Environment};
 						not_found ->
-							io:format("network rule not found for ~p~n", [C#connection.remote#peer.host]),
 							{Domain, Length} = get_domain(C#connection.remote#peer.host),
-							io:format("Domain: ~p~n", [Domain]),
 							case tcprules:check_name_rules(Domain, Length, S#state.rules) of
 								{rule, deny, _, _} ->
 									deny;
 								{rule, allow, _, Environment} ->
 									{allow, Environment};
 								not_found ->
-									io:format("name rule not found for ~p~n", [C#connection.remote#peer.host]),
 									case tcprules:check_empty_rules(S#state.rules) of
 										{rule, allow, _, Environment} ->
 											{allow, Environment};
@@ -227,16 +216,20 @@ check_rules(S, C) ->
 											deny
 									end;
 								Val ->
-									io:format("Unknown rule result: ~p~n", [Val])
+									log(S#state.verbosity, ?ERROR, "Unknown check_name_rules result: ~p", [Val]),
+									deny
 							end;
 						Val ->
-							io:format("Unknown rule result: ~p~n", [Val])
+							log(S#state.verbosity, ?ERROR, "Unknown check_network_rules result: ~p", [Val]),
+							deny
 					end;
 				Val ->
-					io:format("Unknown rule result: ~p~n", [Val])
+					log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
+					deny
 			end;
 		Val ->
-			io:format("Unknown rule result: ~p~n", [Val])
+			log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
+			deny
 	end.
 
 get_domain(undefined) ->
@@ -267,7 +260,7 @@ get_connection_info(Socket, S) ->
 							ok;
 						{error, LocalHostErrMsg}->
 							LocalHost = undefined,
-							io:format("Can't get local hostname: ~p~n", [LocalHostErrMsg])
+							log(S#state.verbosity, ?ERROR, "Can't get local hostname: ~p", [LocalHostErrMsg])
 					end
 			end;
 
@@ -276,7 +269,7 @@ get_connection_info(Socket, S) ->
 			LocalIP = undefined,
 			LocalHost = undefined,
 			LocalPort = undefined,
-			io:format("Can't get socket info: ~p~n", [LocalErrMsg])
+			log(S#state.verbosity, ?ERROR, "Can't get socket info: ~p", [LocalErrMsg])
 	end,
 
 	case inet:peername(Socket) of
@@ -298,19 +291,19 @@ get_connection_info(Socket, S) ->
 											case search_ip(RemoteIP, RemoteHostent#hostent.h_addr_list) of
 												true ->
 													RemoteHost = RemoteHostCandidate,
-													io:format("Hostname ~p resolved back successfuly~n", [RemoteHostCandidate]);
+													log(S#state.verbosity, ?INFO, "Hostname ~p resolved back successfuly", [RemoteHostCandidate]);
 												_ ->
 													RemoteHost = undefined
 											end;
 										{error, RemoteHostResolveErr} ->
-											io:format("RemoteHostResolvErr for ~p:~p~n", [RemoteHostCandidate, RemoteHostResolveErr]),
+											log(S#state.verbosity, ?ERROR, "RemoteHostResolvErr for ~p:~p", [RemoteHostCandidate, RemoteHostResolveErr]),
 											RemoteHost = undefined
 									end
 							end;
 
 						{error, RemoteHostErrMsg}->
 							RemoteHost = undefined,
-							io:format("Can't get remote hostname: ~p~n", [RemoteHostErrMsg])
+							log(S#state.verbosity, ?ERROR, "Can't get remote hostname: ~p", [RemoteHostErrMsg])
 					end
 			end;
 
@@ -319,7 +312,7 @@ get_connection_info(Socket, S) ->
 			RemoteIP = undefined,
 			RemotePort = undefined,
 			RemoteHost = undefined,
-			io:format("Can't get socket info: ~p~n", [RemoteErrMsg])
+			log(S#state.verbosity, ?ERROR, "Can't get socket info: ~p", [RemoteErrMsg])
 	end,
 
 	#connection{local = #peer{ip = LocalIP, port = LocalPort, host = LocalHost, info = LocalInfo},
@@ -341,11 +334,9 @@ handle_connection(Socket, S, Env) ->
 	receive
 		go ->
 			EnvVars = [ extract_var(E) || E <- Env],
-			io:format("Env: ~p~n", [EnvVars]),
 			inet:setopts(Socket, [{active, true}]),
 			process_flag(trap_exit, true),
 			Port = open_port({spawn, proplists:get_value(program, S#state.options)}, [stream, exit_status, binary, {env, EnvVars}]),
-			?LOG("Going into connection loop~n"),
 			Banner = proplists:get_value(banner, S#state.options),
 			case Banner of
 				undefined ->
@@ -374,14 +365,14 @@ connection_loop(Socket, Port, S) ->
 			gen_tcp:send(Socket, Response),
 			connection_loop(Socket, Port, S);
 		{Port, {exit_status, _Status}} ->
-%			?LOG("~p exited with status ~p~n", [Port, _Status]),
+			log(S#state.verbosity, ?INFO, "~p exited with status ~p", [Port, _Status]),
 			connection_controller ! {self(), done},
 			gen_tcp:close(Socket);
 		{'EXIT', Port, _} ->
 			connection_controller ! {self(), done},
 			gen_tcp:close(Socket);
 		{Port, Msg} ->
-			?LOG("Unrouted message from ~p: ~p~n", [Port, Msg])
+			log(S#state.verbosity, ?ERROR, "Unrouted message from ~p: ~p", [Port, Msg])
 	end.
 
 
@@ -395,7 +386,7 @@ option_spec_list() ->
 		{gid,		$g,		"gid",		string,		""}, %% not implemented yet
 		{uid,		$u,		"uid",		string,		""}, %% not implemented yet
 		{localname,	$l,		"localname",	string,		""},
-		{timeout,	$t,		"timeout",	integer,	""}, %% not implemented yet
+		{info_timeout,	$t,		"timeout",	{integer, 26},	""}, %% not implemented yet
 
 		{host,		undefined,	undefined,	string,		""},
 		{port,		undefined,	undefined,	integer,	""},
@@ -414,7 +405,7 @@ option_spec_list() ->
 		{ip_dontroute,	$O,		undefined,	undefined,	""},
 		{delay,		$d,		undefined,	undefined,	""},
 		{nodelay,	$D,		undefined,	undefined,	""},
-		{quiet,		$q,		undefined,	undefined,	""}, %% not implemented yet
-		{err_only,	$Q,		undefined,	undefined,	""}, %% not implemented yet
-		{verbose,	$v,		undefined,	undefined,	""}  %% not implemented yet
+		{quiet,		$q,		undefined,	undefined,	""},
+		{err_only,	$Q,		undefined,	undefined,	""},
+		{verbose,	$v,		undefined,	undefined,	""}
 	].

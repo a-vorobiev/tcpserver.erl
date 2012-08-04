@@ -14,7 +14,6 @@ for_each_line(Fd, Proc, Count, Acc) ->
 	case io:get_line(Fd, "") of
 		eof ->
 			file:close(Fd),
-%			io:format("Acc: ~p~n", [Acc]),
 			Acc;
 		Line ->
 			NewAcc = Proc(Line, Count, Acc),
@@ -26,10 +25,8 @@ parse(Line, Count, Acc) ->
 		{match, _} ->
 			Acc;
 		nomatch ->
-			io:format("Parsing line ~p:~p~n", [Count, Line]),
 			case re:run(Line, "^(.*):(allow|deny)([^#]*)[#|\n].*") of
 				{match, Match} ->
-%					io:format("Rule: ~p~n", [Match]),
 					[_|Boundaries] = Match,
 					Fields = lists:map( fun(X) ->
 						{Start, Length} = X,
@@ -38,7 +35,7 @@ parse(Line, Count, Acc) ->
 					[Address, Type, Environment] = Fields,
 					Acc ++ [{rule, list_to_atom(Type), Address, string:tokens(string:strip(Environment), ",")}];
 				_ ->
-%					io:format("Unknown rule in Line ~p: ~p~n", [Count, Line]),
+					io:format("Unknown rule in Line ~p: ~p~n", [Count, Line]),
 					Acc
 			end
 	end.
@@ -51,7 +48,6 @@ check_full_rules(_, []) ->
 	not_found;
 
 check_full_rules(Address, [Head|Tail]) ->
-%	io:format("check_host_rules called for ~p~n", [Head]),
 	case Head of
 		{rule, _, Address, _} ->
 			Head;
@@ -69,13 +65,10 @@ check_network_rules(_, N, [], _) when N =< 1 ->
 	not_found;
 
 check_network_rules(Address, N, [], Rules) ->
-%	io:format("check_network_rules called for ~p(~p)~n", [Address, N]),
 	check_network_rules(lists:sublist(Address, N - 1), N - 1, Rules, Rules);
 
 check_network_rules(Address, N, [Head|Tail], Rules) ->
-%	io:format("check_network_rules called for ~p(~p)~n", [Address, N]),
 	AddressPattern = string:join(Address,".") ++ [$.],
-%	io:format("~p~n", [AddressPattern]),
 	case Head of
 		{rule, _, AddressPattern, _} ->
 			Head;
@@ -96,9 +89,7 @@ check_name_rules(Address, N, [], Rules) ->
 	check_name_rules(lists:nthtail(1, Address), N - 1, Rules, Rules);
 
 check_name_rules(Address, N, [Head|Tail], Rules) ->
-%	io:format("check_name_rules called for ~p(~p)~n", [Address, N]),
 	AddressPattern = [$=,$.] ++ string:join(Address,"."),
-%	io:format("~p~n", [AddressPattern]),
 	case Head of
 		{rule, _, AddressPattern, _} ->
 			Head;
