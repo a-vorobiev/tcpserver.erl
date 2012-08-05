@@ -30,13 +30,18 @@ main(RawArgs) ->
 			case tcprules:parse_file(RulesFile) of
 				error ->
 					Rules = [],
+					TS = 0,
 					halt(1);
 				Rules ->
+					TS = tcprules:check_file_ts(RulesFile),
 					ok
 			end;
 		true ->
-			Rules = []
+			Rules = [],
+			TS = 0
 	end,
+
+	register(rules_watcher, spawn(fun() -> tcprules:watcher(RulesFile, 5000, Rules) end)),
 
 	Verbosity = case proplists:get_value(quiet, Options) of
 		true ->
@@ -50,7 +55,7 @@ main(RawArgs) ->
 			end
 	end,
 
-	start(#state{options = Options, verbosity = Verbosity, rules = Rules}).
+	start(#state{options = Options, verbosity = Verbosity, rules = Rules, rules_ts = TS}).
 
 
 parse_args(RawArgs) ->
@@ -127,7 +132,6 @@ verify_connection(S, From, Count, Max, Pending) ->
 	connection_counter(S, Count + 1, Max, Pending).
 
 acceptor(LSocket, S) ->
-
 	connection_controller ! {self(), may_i},
 	receive
 		ok ->
@@ -137,10 +141,18 @@ acceptor(LSocket, S) ->
 				go_on
 			end
 	end,
+
 	case gen_tcp:accept(LSocket) of
 		{ok, Socket} ->
 			ConnectionInfo = get_connection_info(Socket, S),
-			case check_rules(S, ConnectionInfo) of
+			rules_watcher ! {new_rules, self(), S#state.rules_ts},
+			receive
+				no_new_rules ->
+					NewS = S;
+				{new_rules, NewTS, NewRules} ->
+					NewS = #state{options = S#state.options, verbosity = S#state.verbosity, rules = NewRules, rules_ts = NewTS}
+			end,
+			case check_rules(NewS, ConnectionInfo) of
 				{allow, Env} ->
 					case proplists:get_value(ip_dontroute, S#state.options) of
 						true ->
@@ -149,13 +161,14 @@ acceptor(LSocket, S) ->
 							ip_as_is
 					end,
 
-					Pid = spawn(fun() -> handle_connection(Socket, S, Env) end),
+					Pid = spawn(fun() -> handle_connection(Socket, NewS, Env) end),
 					gen_tcp:controlling_process(Socket, Pid),
 					Pid ! go,
-					acceptor(LSocket, S);
+					acceptor(LSocket, NewS);
 				deny ->
 					gen_tcp:close(Socket),
-					connection_controller ! {self(), done}
+					connection_controller ! {self(), done},
+					acceptor(LSocket, S)
 			end;
 		{error, econnaborted} ->
 			acceptor(LSocket, S);
@@ -240,17 +253,12 @@ get_domain(Address) ->
 	Length = string:len(Domain),
 	{Domain, Length}.
 
-
 get_connection_info(Socket, S) ->
-
 	LocalInfo = undefined,
 	RemoteInfo = undefined,
-
 	case inet:sockname(Socket) of
 		{ok, {LocalIP, LocalPort}} ->
-
 			LocalNameOption = proplists:get_value(localname, S#state.options),
-
 			if
 				LocalNameOption /= undefined ->
 					LocalHost = LocalNameOption;
@@ -263,8 +271,6 @@ get_connection_info(Socket, S) ->
 							log(S#state.verbosity, ?ERROR, "Can't get local hostname: ~p", [LocalHostErrMsg])
 					end
 			end;
-
-
 		{error, LocalErrMsg} ->
 			LocalIP = undefined,
 			LocalHost = undefined,
@@ -307,17 +313,14 @@ get_connection_info(Socket, S) ->
 					end
 			end;
 
-
 		{error, RemoteErrMsg} ->
 			RemoteIP = undefined,
 			RemotePort = undefined,
 			RemoteHost = undefined,
 			log(S#state.verbosity, ?ERROR, "Can't get socket info: ~p", [RemoteErrMsg])
 	end,
-
 	#connection{local = #peer{ip = LocalIP, port = LocalPort, host = LocalHost, info = LocalInfo},
 		    remote = #peer{ip = RemoteIP, port = RemotePort, host = RemoteHost, info = RemoteInfo}}.
-
 
 
 search_ip(_, []) ->
@@ -326,9 +329,8 @@ search_ip(_, []) ->
 search_ip(IP, [IP|_]) ->
 	true;
 
-search_ip(IP, [IP|Tail]) ->
+search_ip(IP, [_|Tail]) ->
 	search_ip(IP, Tail).
-
 
 handle_connection(Socket, S, Env) ->
 	receive

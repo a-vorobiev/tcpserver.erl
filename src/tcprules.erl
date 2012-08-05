@@ -1,5 +1,7 @@
 -module(tcprules).
--export([parse_file/1, check_full_rules/2, check_network_rules/3, check_name_rules/3, check_empty_rules/1]).
+-export([parse_file/1, check_full_rules/2, check_network_rules/3, check_name_rules/3, check_empty_rules/1, watcher/3, check_file_ts/1]).
+-include_lib("kernel/include/file.hrl").
+-include("tcpserver.hrl").
 
 parse_file(RulesFile) ->
 	case file:open(RulesFile, [read]) of
@@ -99,3 +101,53 @@ check_name_rules(Address, N, [Head|Tail], Rules) ->
 
 check_empty_rules(Rules) ->
 	check_full_rules("", Rules).
+
+watcher(RulesFile, SleepTime, Rules) ->
+	Watcher = self(),
+	spawn(fun() -> recheck_alarm(SleepTime, Watcher) end),
+	Mtime = check_file_ts(RulesFile),
+	watcher(RulesFile, SleepTime, Rules, Mtime).
+
+watcher(RulesFile, SleepTime, Rules, Mtime) ->
+	receive
+		{new_rules, Peer, TS} ->
+			if
+				TS < Mtime ->
+					Peer ! {new_rules, Mtime, Rules};
+				true ->
+					Peer ! no_new_rules
+			end,
+			watcher(RulesFile, SleepTime, Rules, Mtime);
+		recheck ->
+			Watcher = self(),
+			spawn(fun() -> recheck_alarm(SleepTime, Watcher) end),
+			NewMtime = check_file_ts(RulesFile, Mtime),
+			if
+				NewMtime > Mtime ->
+					case parse_file(RulesFile) of
+						error ->
+							NewRules = Rules;
+						NewRules ->
+							ok
+					end,
+					read_rules;
+				true ->
+					NewRules = Rules
+			end,
+			watcher(RulesFile, SleepTime, NewRules, NewMtime)
+	end.
+
+recheck_alarm(SleepTime, Watcher) ->
+	sleep(SleepTime),
+	Watcher ! recheck.
+
+check_file_ts(RulesFile) ->
+	check_file_ts(RulesFile, 0).
+
+check_file_ts(RulesFile, Mtime) ->
+	case file:read_file_info(RulesFile) of
+		{ok, F} ->
+			calendar:datetime_to_gregorian_seconds(F#file_info.mtime);
+		_ ->
+			Mtime
+	end.
