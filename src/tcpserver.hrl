@@ -4,6 +4,8 @@
 
 -define(TCPSERVER_HRL, 1).
 -define(TCP_OPTIONS, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]).
+-define(IDENT_PORT, 113).
+-define(RULES_WATCHER_INTERVAL, 60000). % 60 seconds
 -define(LOG, io:format).
 -define(ERROR, 1).
 -define(INFO, 2).

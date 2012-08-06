@@ -1,5 +1,5 @@
 -module(tcprules).
--export([parse_file/1, check_full_rules/2, check_network_rules/3, check_name_rules/3, check_empty_rules/1, watcher/3, check_file_ts/1]).
+-export([parse_file/1, check_info_rules/3, check_full_rules/2, check_network_rules/3, check_name_rules/3, check_empty_rules/1, watcher/3, check_file_ts/1]).
 -include_lib("kernel/include/file.hrl").
 -include("tcpserver.hrl").
 
@@ -42,6 +42,15 @@ parse(Line, Count, Acc) ->
 			end
 	end.
 
+
+check_info_rules(undefined, _, _) ->
+	not_found;
+
+check_info_rules(_, undefined, _) ->
+	not_found;
+
+check_info_rules(Info, Address, Rules) ->
+	check_full_rules(Info ++ "@" ++ Address, Rules).
 
 check_full_rules(undefined, _) ->
 	not_found;

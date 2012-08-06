@@ -41,7 +41,7 @@ main(RawArgs) ->
 			TS = 0
 	end,
 
-	register(rules_watcher, spawn(fun() -> tcprules:watcher(RulesFile, 5000, Rules) end)),
+	register(rules_watcher, spawn(fun() -> tcprules:watcher(RulesFile, ?RULES_WATCHER_INTERVAL, Rules) end)),
 
 	Verbosity = case proplists:get_value(quiet, Options) of
 		true ->
@@ -196,52 +196,73 @@ acceptor(LSocket, S) ->
 
 check_rules(S, C) ->
 	RemoteIP = inet_parse:ntoa(C#connection.remote#peer.ip),
-	case tcprules:check_full_rules(RemoteIP, S#state.rules) of
+
+	case tcprules:check_info_rules(C#connection.remote#peer.info, RemoteIP, S#state.rules) of
 		{rule, deny, _, _} ->
 			deny;
 		{rule, allow, _, Environment} ->
 			{allow, Environment};
 		not_found ->
-			case tcprules:check_full_rules(C#connection.remote#peer.host, S#state.rules) of
+			case tcprules:check_info_rules(C#connection.remote#peer.info, C#connection.remote#peer.host, S#state.rules) of
 				{rule, deny, _, _} ->
 					deny;
 				{rule, allow, _, Environment} ->
 					{allow, Environment};
 				not_found ->
-					IP_Octets = lists:sublist(string:tokens(RemoteIP, "."), 3),
-					case tcprules:check_network_rules(IP_Octets, 3, S#state.rules) of
+					case tcprules:check_full_rules(RemoteIP, S#state.rules) of
 						{rule, deny, _, _} ->
 							deny;
 						{rule, allow, _, Environment} ->
 							{allow, Environment};
 						not_found ->
-							{Domain, Length} = get_domain(C#connection.remote#peer.host),
-							case tcprules:check_name_rules(Domain, Length, S#state.rules) of
+							case tcprules:check_full_rules(C#connection.remote#peer.host, S#state.rules) of
 								{rule, deny, _, _} ->
 									deny;
 								{rule, allow, _, Environment} ->
 									{allow, Environment};
 								not_found ->
-									case tcprules:check_empty_rules(S#state.rules) of
+									IP_Octets = lists:sublist(string:tokens(RemoteIP, "."), 3),
+									case tcprules:check_network_rules(IP_Octets, 3, S#state.rules) of
+										{rule, deny, _, _} ->
+											deny;
 										{rule, allow, _, Environment} ->
 											{allow, Environment};
-										_ ->
+										not_found ->
+											{Domain, Length} = get_domain(C#connection.remote#peer.host),
+											case tcprules:check_name_rules(Domain, Length, S#state.rules) of
+												{rule, deny, _, _} ->
+													deny;
+												{rule, allow, _, Environment} ->
+													{allow, Environment};
+												not_found ->
+													case tcprules:check_empty_rules(S#state.rules) of
+														{rule, allow, _, Environment} ->
+															{allow, Environment};
+														_ ->
+															deny
+													end;
+												Val ->
+													log(S#state.verbosity, ?ERROR, "Unknown check_name_rules result: ~p", [Val]),
+													deny
+											end;
+										Val ->
+											log(S#state.verbosity, ?ERROR, "Unknown check_network_rules result: ~p", [Val]),
 											deny
 									end;
 								Val ->
-									log(S#state.verbosity, ?ERROR, "Unknown check_name_rules result: ~p", [Val]),
+									log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
 									deny
 							end;
 						Val ->
-							log(S#state.verbosity, ?ERROR, "Unknown check_network_rules result: ~p", [Val]),
+							log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
 							deny
 					end;
 				Val ->
-					log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
+					log(S#state.verbosity, ?ERROR, "Unknown check_info_rules result: ~p", [Val]),
 					deny
 			end;
 		Val ->
-			log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
+			log(S#state.verbosity, ?ERROR, "Unknown check_info_rules result: ~p", [Val]),
 			deny
 	end.
 
@@ -254,8 +275,6 @@ get_domain(Address) ->
 	{Domain, Length}.
 
 get_connection_info(Socket, S) ->
-	LocalInfo = undefined,
-	RemoteInfo = undefined,
 	case inet:sockname(Socket) of
 		{ok, {LocalIP, LocalPort}} ->
 			LocalNameOption = proplists:get_value(localname, S#state.options),
@@ -319,6 +338,35 @@ get_connection_info(Socket, S) ->
 			RemoteHost = undefined,
 			log(S#state.verbosity, ?ERROR, "Can't get socket info: ~p", [RemoteErrMsg])
 	end,
+
+	LocalInfo = local,
+	case proplists:get_value(ignore_info, S#state.options) of
+		true ->
+			RemoteInfo = undefined;
+		_ ->
+			case gen_tcp:connect(RemoteIP, ?IDENT_PORT, [{active, false}, {packet, 0}]) of
+				{ok, IdentSock} ->
+					IdentRequest = io_lib:format("~p , ~p\r\n", [RemotePort, LocalPort]),
+					gen_tcp:send(IdentSock, IdentRequest),
+					RemoteInfo = case gen_tcp:recv(IdentSock, 0) of
+						{ok, IdentResponse} ->
+							case re:run(IdentResponse, "^(.*):(.*)\r\n") of
+								{match, [_, _, {Start, Length}]} ->
+									string:substr(IdentResponse, Start + 1, Length);
+								_ ->
+									log(S#state.verbosity, ?ERROR, "Could not get RemoteInfo", []),
+									undefined
+							end;
+						IdentErr ->
+							log(S#state.verbosity, ?ERROR, "Error while communicating with ident server: ~p", [IdentErr]),
+							undefined
+					end,
+					gen_tcp:close(IdentSock);
+				_ ->
+					RemoteInfo = undefined
+			end
+	end,
+
 	#connection{local = #peer{ip = LocalIP, port = LocalPort, host = LocalHost, info = LocalInfo},
 		    remote = #peer{ip = RemoteIP, port = RemotePort, host = RemoteHost, info = RemoteInfo}}.
 
@@ -401,8 +449,8 @@ option_spec_list() ->
 		{not_paranoid,	$P,		undefined,	undefined,	""},
 		{remote_lookup,	$h,		undefined,	undefined,	""},
 		{donot_lookup,	$H,		undefined,	undefined,	""},
-		{get_info,	$r,		undefined,	undefined,	""}, %% not implemented yet
-		{ignore_info,	$R,		undefined,	undefined,	""}, %% not implemented yet
+		{get_info,	$r,		undefined,	undefined,	""},
+		{ignore_info,	$R,		undefined,	undefined,	""},
 		{ip_as_is,	$o,		undefined,	undefined,	""},
 		{ip_dontroute,	$O,		undefined,	undefined,	""},
 		{delay,		$d,		undefined,	undefined,	""},
