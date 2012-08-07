@@ -160,8 +160,7 @@ acceptor(LSocket, S) ->
 						_ ->
 							ip_as_is
 					end,
-
-					Pid = spawn(fun() -> handle_connection(Socket, NewS, Env) end),
+					Pid = spawn(fun() -> handle_connection(Socket, NewS, Env, ConnectionInfo) end),
 					gen_tcp:controlling_process(Socket, Pid),
 					Pid ! go,
 					acceptor(LSocket, NewS);
@@ -380,13 +379,22 @@ search_ip(IP, [IP|_]) ->
 search_ip(IP, [_|Tail]) ->
 	search_ip(IP, Tail).
 
-handle_connection(Socket, S, Env) ->
+handle_connection(Socket, S, Env, C) ->
 	receive
 		go ->
 			EnvVars = [ extract_var(E) || E <- Env],
+			RemoteIP = case C#connection.remote#peer.ip of
+				{_, _, _, _} ->
+					inet_parse:ntoa(C#connection.remote#peer.ip);
+				_ ->
+					undefined
+			end,
+			RemoteVars = [ {X, Y} || {X, Y} <- [{"TCPREMOTEIP", RemoteIP},
+							    {"TCPREMOTEHOST", C#connection.remote#peer.host},
+							    {"TCPREMOTEINFO", C#connection.remote#peer.info}], Y /= undefined],
 			inet:setopts(Socket, [{active, true}]),
 			process_flag(trap_exit, true),
-			Port = open_port({spawn, proplists:get_value(program, S#state.options)}, [stream, exit_status, binary, {env, EnvVars}]),
+			Port = open_port({spawn, proplists:get_value(program, S#state.options)}, [stream, exit_status, binary, {env, EnvVars ++ RemoteVars}]),
 			Banner = proplists:get_value(banner, S#state.options),
 			case Banner of
 				undefined ->
