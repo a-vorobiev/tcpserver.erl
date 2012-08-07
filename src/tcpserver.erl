@@ -343,11 +343,12 @@ get_connection_info(Socket, S) ->
 		true ->
 			RemoteInfo = undefined;
 		_ ->
-			case gen_tcp:connect(RemoteIP, ?IDENT_PORT, [{active, false}, {packet, 0}]) of
+			Timeout = proplists:get_value(info_timeout, S#state.options),
+			case gen_tcp:connect(RemoteIP, ?IDENT_PORT, [{active, false}, {packet, 0}], Timeout) of
 				{ok, IdentSock} ->
 					IdentRequest = io_lib:format("~p , ~p\r\n", [RemotePort, LocalPort]),
-					gen_tcp:send(IdentSock, IdentRequest),
-					RemoteInfo = case gen_tcp:recv(IdentSock, 0) of
+					gen_tcp:send(IdentSock, IdentRequest, Timeout),
+					RemoteInfo = case gen_tcp:recv(IdentSock, 0, Timeout) of
 						{ok, IdentResponse} ->
 							case re:run(IdentResponse, "^(.*):(.*)\r\n") of
 								{match, [_, _, {Start, Length}]} ->
@@ -444,7 +445,7 @@ option_spec_list() ->
 		{gid,		$g,		"gid",		string,		""}, %% not implemented yet
 		{uid,		$u,		"uid",		string,		""}, %% not implemented yet
 		{localname,	$l,		"localname",	string,		""},
-		{info_timeout,	$t,		"timeout",	{integer, 26},	""}, %% not implemented yet
+		{info_timeout,	$t,		"timeout",	{integer, 26},	""},
 
 		{host,		undefined,	undefined,	string,		""},
 		{port,		undefined,	undefined,	integer,	""},
