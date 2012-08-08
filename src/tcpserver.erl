@@ -3,7 +3,7 @@
 -include("tcpserver.hrl").
 
 usage() ->
-	?LOG("Usage: tcpserver [-1UXpPhHrRoOdDqQv] [-x <rules.cdb>] [-B <banner>] [-c <limit>] [-b <backlog>] [-g <gid>] [-u <uid>] [-l <localname>] [-t <timeout>] <host> <port> <program>~n"),
+	?LOG("Usage: tcpserver [-1XpPhHrRoOdDqQv] [-x <rules.txt>] [-B <banner>] [-c <limit>] [-b <backlog>] [-l <localname>] [-t <timeout>] <host> <port> <program>~n"),
 	halt(1).
 
 main([]) ->
@@ -442,8 +442,8 @@ option_spec_list() ->
 		{banner,	$B,		"banner",	string,		""},
 		{limit,		$c,		"limit",	{integer, 40},	""},
 		{backlog,	$b,		"backlog",	{integer, 20},	""},
-		{gid,		$g,		"gid",		string,		""}, %% not implemented yet
-		{uid,		$u,		"uid",		string,		""}, %% not implemented yet
+%		{gid,		$g,		"gid",		string,		""}, %% not implementable
+%		{uid,		$u,		"uid",		string,		""}, %% not implementable
 		{localname,	$l,		"localname",	string,		""},
 		{info_timeout,	$t,		"timeout",	{integer, 26},	""},
 
@@ -452,7 +452,7 @@ option_spec_list() ->
 		{program,	undefined,	undefined,	string,		""},
 
 		{print_port,	$1,		undefined,	undefined,	""}, %% not implemented yet
-		{envgiduid,	$U,		undefined,	undefined,	""}, %% not implemented yet
+		{envgiduid,	$U,		undefined,	undefined,	""}, %% not implementable
 		{rules_missing,	$X,		undefined,	undefined,	""}, %% not implemented yet
 		{paranoid,	$p,		undefined,	undefined,	""},
 		{not_paranoid,	$P,		undefined,	undefined,	""},
