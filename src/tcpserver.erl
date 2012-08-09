@@ -347,20 +347,25 @@ get_connection_info(Socket, S) ->
 			case gen_tcp:connect(RemoteIP, ?IDENT_PORT, [{active, false}, {packet, 0}], Timeout) of
 				{ok, IdentSock} ->
 					IdentRequest = io_lib:format("~p , ~p\r\n", [RemotePort, LocalPort]),
-					gen_tcp:send(IdentSock, IdentRequest, Timeout),
-					RemoteInfo = case gen_tcp:recv(IdentSock, 0, Timeout) of
-						{ok, IdentResponse} ->
-							case re:run(IdentResponse, "^(.*):(.*)\r\n") of
-								{match, [_, _, {Start, Length}]} ->
-									string:substr(IdentResponse, Start + 1, Length);
-								_ ->
-									log(S#state.verbosity, ?ERROR, "Could not get RemoteInfo", []),
+					RemoteInfo = try gen_tcp:send(IdentSock, IdentRequest, Timeout) of
+						ok ->
+							try gen_tcp:recv(IdentSock, 0, Timeout) of
+								{ok, IdentResponse} ->
+									case re:run(IdentResponse, "^(.*):(.*)\r\n") of
+										{match, [_, _, {Start, Length}]} ->
+											string:substr(IdentResponse, Start + 1, Length);
+										_ ->
+											log(S#state.verbosity, ?ERROR, "Could not get RemoteInfo", []),
+											undefined
+									end
+								catch IdentExc:IdentReason->
+									log(S#state.verbosity, ?ERROR, "Error while communicating with ident server (~p: ~p)", [IdentExc, IdentReason]),
 									undefined
-							end;
-						IdentErr ->
-							log(S#state.verbosity, ?ERROR, "Error while communicating with ident server: ~p", [IdentErr]),
+							end
+						catch _:_ ->
 							undefined
 					end,
+
 					gen_tcp:close(IdentSock);
 				_ ->
 					RemoteInfo = undefined
