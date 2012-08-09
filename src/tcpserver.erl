@@ -10,8 +10,7 @@ main([]) ->
 	usage();
 
 main(RawArgs) ->
-	{Options, _} = parse_args(RawArgs),
-
+	{Options, Args} = parse_args(RawArgs),
 	% check if all required options are present
 	[
 		case proplists:get_value(Param, Options) of
@@ -55,7 +54,15 @@ main(RawArgs) ->
 			end
 	end,
 
-	start(#state{options = Options, verbosity = Verbosity, rules = Rules, rules_ts = TS}).
+	FinalOptions = case Args of
+		[] ->
+			Options;
+		_ ->
+			Program = proplists:get_value(program, Options) ++ " " ++ string:join(Args, " "),
+			proplists:delete(program, Options) ++ [{program, Program}]
+	end,
+
+	start(#state{options = FinalOptions, verbosity = Verbosity, rules = Rules, rules_ts = TS}).
 
 
 parse_args(RawArgs) ->
