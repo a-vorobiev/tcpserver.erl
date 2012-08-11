@@ -396,18 +396,18 @@ handle_connection(Socket, S, Env, C) ->
 	receive
 		go ->
 			EnvVars = [ extract_var(E) || E <- Env],
-			RemoteIP = case C#connection.remote#peer.ip of
-				{_, _, _, _} ->
-					inet_parse:ntoa(C#connection.remote#peer.ip);
-				_ ->
-					undefined
-			end,
+			RemoteIP = ip2str(C#connection.remote#peer.ip),
+			LocalIP = ip2str(C#connection.local#peer.ip),
+			LocalVars = [ {X, Y} || {X, Y} <- [{"TCPLOCALIP", LocalIP},
+							   {"TCPLOCALHOST", C#connection.local#peer.host},
+							   {"TCPLOCALPORT", integer_to_list(C#connection.local#peer.port)}], Y /= undefined],
 			RemoteVars = [ {X, Y} || {X, Y} <- [{"TCPREMOTEIP", RemoteIP},
 							    {"TCPREMOTEHOST", C#connection.remote#peer.host},
+							    {"TCPREMOTEPORT", integer_to_list(C#connection.remote#peer.port)},
 							    {"TCPREMOTEINFO", C#connection.remote#peer.info}], Y /= undefined],
 			inet:setopts(Socket, [{active, true}]),
 			process_flag(trap_exit, true),
-			Port = open_port({spawn, proplists:get_value(program, S#state.options)}, [stream, exit_status, binary, {env, EnvVars ++ RemoteVars}]),
+			Port = open_port({spawn, proplists:get_value(program, S#state.options)}, [stream, exit_status, binary, {env, EnvVars ++ [{"PROTO", "TCP"}] ++ LocalVars ++ RemoteVars}]),
 			Banner = proplists:get_value(banner, S#state.options),
 			case Banner of
 				undefined ->
@@ -423,6 +423,14 @@ handle_connection(Socket, S, Env, C) ->
 extract_var(Str) ->
 	[Var, Val] = string:tokens(Str, "="),
 	{Var, Val}.
+
+ip2str(IP) ->
+	case IP of
+		{_, _, _, _} ->
+			inet_parse:ntoa(IP);
+		_ ->
+			undefined
+	end.
 
 connection_loop(Socket, Port, S) ->
 	receive

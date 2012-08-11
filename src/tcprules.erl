@@ -138,8 +138,7 @@ watcher(RulesFile, SleepTime, Rules, Mtime) ->
 							NewRules = Rules;
 						NewRules ->
 							ok
-					end,
-					read_rules;
+					end;
 				true ->
 					NewRules = Rules
 			end,
