@@ -288,13 +288,7 @@ get_connection_info(Socket, S) ->
 				LocalNameOption /= undefined ->
 					LocalHost = LocalNameOption;
 				true ->
-					case inet:gethostbyaddr(LocalIP) of
-						{ok, #hostent{h_name = LocalHost}} ->
-							ok;
-						{error, LocalHostErrMsg}->
-							LocalHost = undefined,
-							log(S#state.verbosity, ?ERROR, "Can't get local hostname: ~p", [LocalHostErrMsg])
-					end
+					LocalHost = resolve_ptr(S, LocalIP)
 			end;
 		{error, LocalErrMsg} ->
 			LocalIP = undefined,
@@ -305,46 +299,41 @@ get_connection_info(Socket, S) ->
 
 	case inet:peername(Socket) of
 		{ok, {RemoteIP, RemotePort}} ->
-
 			case proplists:get_value(donot_lookup, S#state.options) of
 				true ->
 					RemoteHost = undefined;
-
 				_ ->
-					case inet:gethostbyaddr(RemoteIP) of
-						{ok, #hostent{h_name = RemoteHostCandidate}} ->
+					RemoteHost = case resolve_ptr(S, RemoteIP) of
+						undefined ->
+							undefined;
+						RemoteHostCandidate ->
 							case proplists:get_value(not_paranoid, S#state.options) of
 								true ->
-									RemoteHost = RemoteHostCandidate;
+									RemoteHostCandidate;
 								_ ->
 									case inet:gethostbyname(RemoteHostCandidate) of
 										{ok, RemoteHostent} ->
 											case search_ip(RemoteIP, RemoteHostent#hostent.h_addr_list) of
 												true ->
-													RemoteHost = RemoteHostCandidate,
-													log(S#state.verbosity, ?INFO, "Hostname ~p resolved back successfuly", [RemoteHostCandidate]);
+													log(S#state.verbosity, ?INFO, "Hostname ~p resolved back successfuly", [RemoteHostCandidate]),
+													RemoteHostCandidate;
 												_ ->
-													RemoteHost = undefined
+													log(S#state.verbosity, ?INFO, "Could not resolve back ~p, TCPREMOTEHOST is undefined", [RemoteHostCandidate]),
+													undefined
 											end;
 										{error, RemoteHostResolveErr} ->
 											log(S#state.verbosity, ?ERROR, "RemoteHostResolvErr for ~p:~p", [RemoteHostCandidate, RemoteHostResolveErr]),
-											RemoteHost = undefined
+											undefined
 									end
-							end;
-
-						{error, RemoteHostErrMsg}->
-							RemoteHost = undefined,
-							log(S#state.verbosity, ?ERROR, "Can't get remote hostname: ~p", [RemoteHostErrMsg])
+							end
 					end
 			end;
-
 		{error, RemoteErrMsg} ->
 			RemoteIP = undefined,
 			RemotePort = undefined,
 			RemoteHost = undefined,
 			log(S#state.verbosity, ?ERROR, "Can't get socket info: ~p", [RemoteErrMsg])
 	end,
-
 	LocalInfo = local,
 	case proplists:get_value(ignore_info, S#state.options) of
 		true ->
@@ -372,16 +361,25 @@ get_connection_info(Socket, S) ->
 						catch _:_ ->
 							undefined
 					end,
-
 					gen_tcp:close(IdentSock);
 				_ ->
 					RemoteInfo = undefined
 			end
 	end,
-
 	#connection{local = #peer{ip = LocalIP, port = LocalPort, host = LocalHost, info = LocalInfo},
 		    remote = #peer{ip = RemoteIP, port = RemotePort, host = RemoteHost, info = RemoteInfo}}.
 
+resolve_ptr(S, IP) ->
+	case inet_res:resolve(IP, any, ptr) of
+		{ok, #dns_rec{anlist=[Answer|_]}} ->
+			proplists:get_value(data, inet_dns:rr(Answer));
+		{error, Reply} ->
+			log(S#state.verbosity, ?ERROR, "Can't resolve ~p: ~p", [IP, Reply]),
+			undefined;
+		_ ->
+			log(S#state.verbosity, ?ERROR, "Can't resolve ~p", [IP]),
+			undefined
+	end.
 
 search_ip(_, []) ->
 	false;

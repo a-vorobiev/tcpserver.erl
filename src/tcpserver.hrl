@@ -1,6 +1,7 @@
 -ifndef(TCPSERVER_HRL).
 
 -include_lib("kernel/include/inet.hrl").
+-include_lib("kernel/src/inet_dns.hrl").
 
 -define(TCPSERVER_HRL, 1).
 -define(TCP_OPTIONS, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]).
