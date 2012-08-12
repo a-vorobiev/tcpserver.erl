@@ -420,7 +420,7 @@ handle_connection(Socket, S, Env, C) ->
 
 extract_var(Str) ->
 	[Var, Val] = string:tokens(Str, "="),
-	{Var, Val}.
+	{Var, string:strip(Val, both, $")}.
 
 ip2str(IP) ->
 	case IP of
