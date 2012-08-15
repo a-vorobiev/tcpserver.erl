@@ -34,14 +34,45 @@ parse(Line, Count, Acc) ->
 						{Start, Length} = X,
 						string:substr(Line, Start + 1, Length)
 					end, Boundaries),
-					[Address, Type, Environment] = Fields,
-					Acc ++ [{rule, list_to_atom(Type), Address, string:tokens(string:strip(Environment), ",")}];
+					[Address, Action, EnvString] = Fields,
+					EnvVars = [extract_var(E) || E <- string:tokens(string:strip(EnvString), ",")],
+					[Limits, DieMsgs] = find_limits(EnvVars),
+					Acc ++ [#rule{address = Address, action = list_to_atom(Action), vars = EnvVars, limits = Limits, diemsgs = DieMsgs}];
 				_ ->
 					io:format("Unknown rule in Line ~p: ~p~n", [Count, Line]),
 					Acc
 			end
 	end.
 
+find_limits(EnvVars) ->
+	find_limits(#limits{}, #diemsgs{}, EnvVars).
+
+find_limits(Limits, DieMsgs, []) ->
+	[Limits, DieMsgs];
+
+find_limits(Limits, DieMsgs, [EnvVar | Tail]) ->
+	case EnvVar of
+		{"MAXCONNIP", Value} ->
+			find_limits(Limits#limits{maxconnip = list_to_integer(Value)}, DieMsgs, Tail);
+		{"MAXCONNC", Value} ->
+			find_limits(Limits#limits{maxconnc = list_to_integer(Value)}, DieMsgs, Tail);
+		{"MAXLOAD", Value} ->
+			find_limits(Limits#limits{maxload = list_to_integer(Value)}, DieMsgs, Tail);
+		{"DIEMSG", Value} ->
+			find_limits(Limits, DieMsgs#diemsgs{common = Value}, Tail);
+		{"DIEMSG_MAXCONNIP", Value} ->
+			find_limits(Limits, DieMsgs#diemsgs{maxconnip = Value}, Tail);
+		{"DIEMSG_MAXCONNC", Value} ->
+			find_limits(Limits, DieMsgs#diemsgs{maxconnc = Value}, Tail);
+		{"DIEMSG_MAXLOAD", Value} ->
+			find_limits(Limits, DieMsgs#diemsgs{maxload = Value}, Tail);
+		_ ->
+			find_limits(Limits, DieMsgs, Tail)
+	end.
+
+extract_var(Str) ->
+	[Var, Val] = string:tokens(Str, "="),
+	{string:strip(Var), string:strip(string:strip(Val), both, $")}.
 
 check_info_rules(undefined, _, _) ->
 	not_found;
@@ -60,7 +91,7 @@ check_full_rules(_, []) ->
 
 check_full_rules(Address, [Head|Tail]) ->
 	case Head of
-		{rule, _, Address, _} ->
+		#rule{address = Address} ->
 			Head;
 		_ ->
 		check_full_rules(Address, Tail)
@@ -81,7 +112,7 @@ check_network_rules(Address, N, [], Rules) ->
 check_network_rules(Address, N, [Head|Tail], Rules) ->
 	AddressPattern = string:join(Address,".") ++ [$.],
 	case Head of
-		{rule, _, AddressPattern, _} ->
+		#rule{address = AddressPattern} ->
 			Head;
 		_ ->
 		check_network_rules(Address, N, Tail, Rules)
@@ -102,7 +133,7 @@ check_name_rules(Address, N, [], Rules) ->
 check_name_rules(Address, N, [Head|Tail], Rules) ->
 	AddressPattern = [$=,$.] ++ string:join(Address,"."),
 	case Head of
-		{rule, _, AddressPattern, _} ->
+		#rule{address = AddressPattern} ->
 			Head;
 		_ ->
 		check_name_rules(Address, N, Tail, Rules)

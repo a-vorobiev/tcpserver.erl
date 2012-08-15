@@ -97,8 +97,6 @@ start(S) ->
 			TCPOptions = ?TCP_OPTIONS ++ [{ip, IP}, {backlog, Backlog}]
 	end,
 
-
-
 	case gen_tcp:listen(Port, TCPOptions) of
 		{ok, LSocket} ->
 			register(connection_controller, spawn(fun() -> connection_counter(S, 0, Limit, 0) end)),
@@ -160,7 +158,8 @@ acceptor(LSocket, S) ->
 					NewS = #state{options = S#state.options, verbosity = S#state.verbosity, rules = NewRules, rules_ts = NewTS}
 			end,
 			case check_rules(NewS, ConnectionInfo) of
-				{allow, Env} ->
+				#rule{action = allow, vars = Env} ->
+					% check limits here
 					case proplists:get_value(ip_dontroute, S#state.options) of
 						true ->
 							inet:setopts(Socket, [{dontroute, true}]);
@@ -171,7 +170,7 @@ acceptor(LSocket, S) ->
 					gen_tcp:controlling_process(Socket, Pid),
 					Pid ! go,
 					acceptor(LSocket, NewS);
-				deny ->
+				#rule{action = deny} ->
 					gen_tcp:close(Socket),
 					connection_controller ! {self(), done},
 					acceptor(LSocket, S)
@@ -202,74 +201,80 @@ acceptor(LSocket, S) ->
 
 check_rules(S, C) ->
 	RemoteIP = inet_parse:ntoa(C#connection.remote#peer.ip),
+	try_info_rules(S, C, RemoteIP).
 
+try_info_rules(S, C, RemoteIP) ->
 	case tcprules:check_info_rules(C#connection.remote#peer.info, RemoteIP, S#state.rules) of
-		{rule, deny, _, _} ->
-			deny;
-		{rule, allow, _, Environment} ->
-			{allow, Environment};
+		Value when is_record(Value, rule) ->
+			Value;
 		not_found ->
 			case tcprules:check_info_rules(C#connection.remote#peer.info, C#connection.remote#peer.host, S#state.rules) of
-				{rule, deny, _, _} ->
-					deny;
-				{rule, allow, _, Environment} ->
-					{allow, Environment};
+				Value when is_record(Value, rule) ->
+					Value;
 				not_found ->
-					case tcprules:check_full_rules(RemoteIP, S#state.rules) of
-						{rule, deny, _, _} ->
-							deny;
-						{rule, allow, _, Environment} ->
-							{allow, Environment};
-						not_found ->
-							case tcprules:check_full_rules(C#connection.remote#peer.host, S#state.rules) of
-								{rule, deny, _, _} ->
-									deny;
-								{rule, allow, _, Environment} ->
-									{allow, Environment};
-								not_found ->
-									IP_Octets = lists:sublist(string:tokens(RemoteIP, "."), 3),
-									case tcprules:check_network_rules(IP_Octets, 3, S#state.rules) of
-										{rule, deny, _, _} ->
-											deny;
-										{rule, allow, _, Environment} ->
-											{allow, Environment};
-										not_found ->
-											{Domain, Length} = get_domain(C#connection.remote#peer.host),
-											case tcprules:check_name_rules(Domain, Length, S#state.rules) of
-												{rule, deny, _, _} ->
-													deny;
-												{rule, allow, _, Environment} ->
-													{allow, Environment};
-												not_found ->
-													case tcprules:check_empty_rules(S#state.rules) of
-														{rule, allow, _, Environment} ->
-															{allow, Environment};
-														_ ->
-															deny
-													end;
-												Val ->
-													log(S#state.verbosity, ?ERROR, "Unknown check_name_rules result: ~p", [Val]),
-													deny
-											end;
-										Val ->
-											log(S#state.verbosity, ?ERROR, "Unknown check_network_rules result: ~p", [Val]),
-											deny
-									end;
-								Val ->
-									log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
-									deny
-							end;
-						Val ->
-							log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Val]),
-							deny
-					end;
-				Val ->
-					log(S#state.verbosity, ?ERROR, "Unknown check_info_rules result: ~p", [Val]),
-					deny
+					try_full_rules(S, C, RemoteIP);
+				Unknown ->
+					log(S#state.verbosity, ?ERROR, "Unknown check_info_rules result: ~p", [Unknown]),
+					#rule{action = deny}
 			end;
-		Val ->
-			log(S#state.verbosity, ?ERROR, "Unknown check_info_rules result: ~p", [Val]),
-			deny
+		Unknown ->
+			log(S#state.verbosity, ?ERROR, "Unknown check_info_rules result: ~p", [Unknown]),
+			#rule{action = deny}
+	end.
+
+
+try_full_rules(S, C, RemoteIP) ->
+	case tcprules:check_full_rules(RemoteIP, S#state.rules) of
+		Value when is_record(Value, rule) ->
+			Value;
+		not_found ->
+			case tcprules:check_full_rules(C#connection.remote#peer.host, S#state.rules) of
+				Value when is_record(Value, rule) ->
+					Value;
+				not_found ->
+					try_subnet_rules(S, C, RemoteIP);
+				Unknown ->
+					log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Unknown]),
+					#rule{action = deny}
+			end;
+		Unknown ->
+			log(S#state.verbosity, ?ERROR, "Unknown check_full_rules result: ~p", [Unknown]),
+			#rule{action = deny}
+	end.
+
+try_subnet_rules(S, C, RemoteIP) ->
+	Subnet = lists:sublist(string:tokens(RemoteIP, "."), 3),
+	case tcprules:check_network_rules(Subnet, 3, S#state.rules) of
+		Value when is_record(Value, rule) ->
+			Value;
+		not_found ->
+			try_domain_rules(S, C);
+		Unknown ->
+			log(S#state.verbosity, ?ERROR, "Unknown check_network_rules result: ~p", [Unknown]),
+			#rule{action = deny}
+	end.
+
+try_domain_rules(S, C) ->
+	{Domain, Length} = get_domain(C#connection.remote#peer.host),
+	case tcprules:check_name_rules(Domain, Length, S#state.rules) of
+		Value when is_record(Value, rule) ->
+			Value;
+		not_found ->
+			try_empty_rules(S);
+		Unknown ->
+			log(S#state.verbosity, ?ERROR, "Unknown check_domain_rules result: ~p", [Unknown]),
+			#rule{action = deny}
+	end.
+
+try_empty_rules(S) ->
+	case tcprules:check_empty_rules(S#state.rules) of
+		Value when is_record(Value, rule) ->
+			Value;
+		not_found ->
+			#rule{action=deny};
+		Unknown ->
+			log(S#state.verbosity, ?ERROR, "Unknown check_empty_rules result: ~p", [Unknown]),
+			#rule{action = deny}
 	end.
 
 get_domain(undefined) ->
@@ -390,10 +395,9 @@ search_ip(IP, [IP|_]) ->
 search_ip(IP, [_|Tail]) ->
 	search_ip(IP, Tail).
 
-handle_connection(Socket, S, Env, C) ->
+handle_connection(Socket, S, EnvVars, C) ->
 	receive
 		go ->
-			EnvVars = [ extract_var(E) || E <- Env],
 			RemoteIP = ip2str(C#connection.remote#peer.ip),
 			LocalIP = ip2str(C#connection.local#peer.ip),
 			LocalVars = [ {X, Y} || {X, Y} <- [{"TCPLOCALIP", LocalIP},
@@ -417,10 +421,6 @@ handle_connection(Socket, S, Env, C) ->
 %%	after XXX ->
 %%		timeout
 	end.
-
-extract_var(Str) ->
-	[Var, Val] = string:tokens(Str, "="),
-	{Var, string:strip(Val, both, $")}.
 
 ip2str(IP) ->
 	case IP of

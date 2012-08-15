@@ -14,6 +14,9 @@
 -record(state, {options, verbosity, rules, rules_ts}).
 -record(peer, {ip, port, host, info}).
 -record(connection, {local, remote}).
+-record(rule, {address, action, vars, limits, diemsgs}).
+-record(limits, {maxconnip, maxconnc, maxload}).
+-record(diemsgs, {common, maxconnip, maxconnc, maxload}).
 
 sleep(T) ->
 	receive
