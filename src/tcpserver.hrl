@@ -11,7 +11,7 @@
 -define(ERROR, 1).
 -define(INFO, 2).
 
--record(state, {options, verbosity, rules, rules_ts}).
+-record(state, {options, verbosity, rules, rules_ts, default_diemsgs}).
 -record(peer, {ip, port, host, info}).
 -record(connection, {local, remote}).
 -record(rule, {address, action, vars, limits, diemsgs}).

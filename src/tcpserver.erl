@@ -62,8 +62,38 @@ main(RawArgs) ->
 			proplists:delete(program, Options) ++ [{program, Program}]
 	end,
 
-	start(#state{options = FinalOptions, verbosity = Verbosity, rules = Rules, rules_ts = TS}).
+	DefaultDiemsgs = get_default_diemsgs(),
 
+	{ok, _} = cpu_sup:start(),
+
+	start(#state{options = FinalOptions, verbosity = Verbosity, rules = Rules, rules_ts = TS, default_diemsgs = DefaultDiemsgs}).
+
+get_default_diemsgs() ->
+	case os:getenv("DIEMSG") of
+		false ->
+			DieMsg = undefined;
+		DieMsg ->
+			go_on
+	end,
+	case os:getenv("DIEMSG_MAXLOAD") of
+		false ->
+			DieMsgMaxLoad = undefined;
+		DieMsgMaxLoad ->
+			go_on
+	end,
+	case os:getenv("DIEMSG_MAXCONNIP") of
+		false ->
+			DieMsgMaxConnIP = undefined;
+		DieMsgMaxConnIP ->
+			go_on
+	end,
+	case os:getenv("DIEMSG_MAXCONNC") of
+		false ->
+			DieMsgMaxConnC = undefined;
+		DieMsgMaxConnC ->
+			go_on
+	end,
+	#diemsgs{common = DieMsg, maxconnip = DieMsgMaxConnIP, maxconnc = DieMsgMaxConnC, maxload = DieMsgMaxLoad}.
 
 parse_args(RawArgs) ->
 	OptSpecList = option_spec_list(),
@@ -99,7 +129,7 @@ start(S) ->
 
 	case gen_tcp:listen(Port, TCPOptions) of
 		{ok, LSocket} ->
-			register(connection_controller, spawn(fun() -> connection_counter(S, 0, Limit, 0) end)),
+			register(connection_guard, spawn(fun() -> connection_guard(S, 0, Limit, 0, dict:new()) end)),
 			register(acceptor, spawn(fun() -> acceptor(LSocket, S) end)),
 			sleep(infinity);
 		{error, eaddrnotavail} ->
@@ -113,31 +143,89 @@ start(S) ->
 			log(S#state.verbosity, ?ERROR, "Error while listening on ~p:~p (~p)", [IP, Port, ListenErrMsg])
 	end.
 
-connection_counter(S, Count, Max, Pending) ->
+connection_guard(S, Count, Max, Pending, Connections) ->
 	receive
 		{From, may_i} ->
 			log(S#state.verbosity, ?INFO, "~p asks for accept permission; connection count: ~p", [From, Count]),
-			verify_connection(S, From, Count, Max, Pending);
+			verify_connection(S, From, Count, Max, Pending, Connections);
+		{From, check_limits, R, C} ->
+			case verify_limits(R#rule.limits, C#connection.remote#peer.ip, Connections) of
+				allow ->
+					From ! allow,
+					NewConnections = dict:update_counter(C#connection.remote#peer.ip, 1, Connections);
+				{deny, Reason} ->
+					From ! {deny, Reason},
+					NewConnections = Connections
+			end,
+			connection_guard(S, Count, Max, Pending, NewConnections);
 		{_, done} ->
-			case Pending of
-				0 ->
-					connection_counter(S, Count - 1, Max, Pending);
-				Val ->
-					acceptor ! permission,
-					connection_counter(S, Count, Max, Val - 1)
-			end
+			proceed_pending_connections(S, Count, Max, Pending, Connections);
+		{_, done, IP} ->
+			proceed_pending_connections(S, Count, Max, Pending, dict:update_counter(IP, -1, Connections))
 	end.
 
-verify_connection(S, From, Max, Max, Pending) ->
-	From ! overloaded,
-	connection_counter(S, Max, Max, Pending + 1);
+proceed_pending_connections(S, Count, Max, Pending, Connections) ->
+	case Pending of
+		0 ->
+			connection_guard(S, Count - 1, Max, Pending, Connections);
+		Val ->
+			acceptor ! permission,
+			connection_guard(S, Count, Max, Val - 1, Connections)
+	end.
 
-verify_connection(S, From, Count, Max, Pending) ->
+verify_limits(L, IP, Connections) ->
+	case L#limits.maxload of
+		MaxLoad when is_integer(MaxLoad) ->
+			Avg1 = cpu_sup:avg1() / 256 * 100,
+			if
+				Avg1 >= L#limits.maxload ->
+					{deny, maxload};
+				true ->
+					verify_connip(L, IP, Connections)
+			end;
+		undefined ->
+			verify_connip(L, IP, Connections)
+	end.
+
+verify_connip(L, IP, Connections) ->
+	case L#limits.maxconnip of
+		MaxConnIP when is_integer(MaxConnIP) andalso MaxConnIP > 0 ->
+			case dict:find(IP, Connections) of
+				{ok, Value} when is_integer(Value) andalso Value >= MaxConnIP ->
+					{deny, maxconnip};
+				_ ->
+					verify_connc(L, IP, Connections)
+			end;
+		MaxConnIP when is_integer(MaxConnIP) ->
+			{deny, maxconnip};
+		undefined ->
+			verify_connc(L, IP, Connections)
+	end.
+
+verify_connc(L, IP, Connections) ->
+	case L#limits.maxconnc of
+		MaxConnC when is_integer(MaxConnC) ->
+			ConnC = dict:size(dict:filter(fun(K, V) -> {A,B,C,_} = IP, case K of {A,B,C,_} when V > 0 -> true; _ -> false end end, Connections)),
+			if
+				ConnC >= MaxConnC ->
+					{deny, maxconnc};
+				true ->
+					allow
+			end;
+		undefined ->
+			allow
+	end.
+
+verify_connection(S, From, Max, Max, Pending, Connections) ->
+	From ! overloaded,
+	connection_guard(S, Max, Max, Pending + 1, Connections);
+
+verify_connection(S, From, Count, Max, Pending, Connections) ->
 	From ! ok,
-	connection_counter(S, Count + 1, Max, Pending).
+	connection_guard(S, Count + 1, Max, Pending, Connections).
 
 acceptor(LSocket, S) ->
-	connection_controller ! {self(), may_i},
+	connection_guard ! {self(), may_i},
 	receive
 		ok ->
 			go_on;
@@ -158,30 +246,121 @@ acceptor(LSocket, S) ->
 					NewS = #state{options = S#state.options, verbosity = S#state.verbosity, rules = NewRules, rules_ts = NewTS}
 			end,
 			case check_rules(NewS, ConnectionInfo) of
-				#rule{action = allow, vars = Env} ->
-					% check limits here
+				#rule{action = allow} = R ->
 					case proplists:get_value(ip_dontroute, S#state.options) of
 						true ->
 							inet:setopts(Socket, [{dontroute, true}]);
 						_ ->
 							ip_as_is
 					end,
-					Pid = spawn(fun() -> handle_connection(Socket, NewS, Env, ConnectionInfo) end),
-					gen_tcp:controlling_process(Socket, Pid),
-					Pid ! go,
-					acceptor(LSocket, NewS);
+					connection_guard ! {self(), check_limits, R, ConnectionInfo},
+					receive
+						allow ->
+							Pid = spawn(fun() -> handle_connection(Socket, NewS, R#rule.vars, ConnectionInfo) end),
+							gen_tcp:controlling_process(Socket, Pid),
+							Pid ! go,
+							acceptor(LSocket, NewS);
+						{deny, Reason} ->
+							sleep(1000),
+							case Reason of
+								maxconnip ->
+									case get_diemsg(S, R, maxconnip) of
+										undefined ->
+											skip;
+										Msg ->
+											log(S#state.verbosity, ?INFO, "Connection from ~p denied: MAXCONNIP", [ConnectionInfo#connection.remote#peer.ip]),
+											gen_tcp:send(Socket, Msg ++ "\r\n")
+									end;
+								maxconnc ->
+									case get_diemsg(S, R, maxconnc) of
+										undefined ->
+											skip;
+										Msg ->
+											log(S#state.verbosity, ?INFO, "Connection from ~p denied: MAXCONNC", [ConnectionInfo#connection.remote#peer.ip]),
+											gen_tcp:send(Socket, Msg ++ "\r\n")
+									end;
+								maxload ->
+									case get_diemsg(S, R, maxload) of
+										undefined ->
+											skip;
+										Msg ->
+											log(S#state.verbosity, ?INFO, "Connection from ~p denied: MAXLOAD", [ConnectionInfo#connection.remote#peer.ip]),
+											gen_tcp:send(Socket, Msg ++ "\r\n")
+									end;
+								_ ->
+									log(S#state.verbosity, ?ERROR, "Unknown reason for denial: ~p", [Reason])
+							end,
+							gen_tcp:close(Socket),
+							connection_guard ! {self(), done},
+							acceptor(LSocket, S)
+					end;
 				#rule{action = deny} ->
 					gen_tcp:close(Socket),
-					connection_controller ! {self(), done},
+					connection_guard ! {self(), done, ConnectionInfo#connection.remote#peer.ip},
 					acceptor(LSocket, S)
 			end;
 		{error, econnaborted} ->
 			acceptor(LSocket, S);
 		{error, closed} ->
-			connection_controller ! {self(), done},
+			connection_guard ! {self(), done},
 			closed
 %%		{Msg} ->
 %%			log Msg
+	end.
+
+get_diemsg(S, R, Limit) ->
+	case Limit of
+		maxconnip ->
+			case R#rule.diemsgs#diemsgs.maxconnip of
+				undefined->
+					case S#state.default_diemsgs#diemsgs.maxconnip of
+						undefined ->
+							case R#rule.diemsgs#diemsgs.common of
+								undefined ->
+									S#state.default_diemsgs#diemsgs.common;
+								Msg ->
+									Msg
+							end;
+						Msg ->
+							Msg
+					end;
+				Msg ->
+					Msg
+			end;
+		maxconnc ->
+			case R#rule.diemsgs#diemsgs.maxconnc of
+				undefined->
+					case S#state.default_diemsgs#diemsgs.maxconnc of
+						undefined ->
+							case R#rule.diemsgs#diemsgs.common of
+								undefined ->
+									S#state.default_diemsgs#diemsgs.common;
+								Msg ->
+									Msg
+							end;
+						Msg ->
+							Msg
+					end;
+				Msg ->
+					Msg
+			end;
+		maxload->
+			case R#rule.diemsgs#diemsgs.maxload of
+				undefined->
+					case S#state.default_diemsgs#diemsgs.maxload of
+						undefined ->
+							case R#rule.diemsgs#diemsgs.common of
+								undefined ->
+									S#state.default_diemsgs#diemsgs.common;
+								Msg ->
+									Msg
+							end;
+						Msg ->
+							Msg
+					end;
+				Msg ->
+					Msg
+			end
 	end.
 
 %%%
@@ -417,7 +596,7 @@ handle_connection(Socket, S, EnvVars, C) ->
 				_ ->
 					gen_tcp:send(Socket, Banner)
 			end,
-			connection_loop(Socket, Port, S)
+			connection_loop(Socket, Port, S, C)
 %%	after XXX ->
 %%		timeout
 	end.
@@ -430,26 +609,28 @@ ip2str(IP) ->
 			undefined
 	end.
 
-connection_loop(Socket, Port, S) ->
+connection_loop(Socket, Port, S, C) ->
 	receive
 		{tcp, Socket, Data} ->
 			port_command(Port, Data),
-			connection_loop(Socket, Port, S);
+			connection_loop(Socket, Port, S, C);
 		{tcp_closed, Socket} ->
-			connection_controller ! {self(), done},
+			connection_guard ! {self(), done, C#connection.remote#peer.ip},
 			port_close(Port); %% more debug here
 		{Port, {data, Response}} ->
 			gen_tcp:send(Socket, Response),
-			connection_loop(Socket, Port, S);
+			connection_loop(Socket, Port, S, C);
 		{Port, {exit_status, _Status}} ->
 			log(S#state.verbosity, ?INFO, "~p exited with status ~p", [Port, _Status]),
-			connection_controller ! {self(), done},
+			connection_guard ! {self(), done, C#connection.remote#peer.ip},
 			gen_tcp:close(Socket);
 		{'EXIT', Port, _} ->
-			connection_controller ! {self(), done},
+			connection_guard ! {self(), done, C#connection.remote#peer.ip},
 			gen_tcp:close(Socket);
 		{Port, Msg} ->
-			log(S#state.verbosity, ?ERROR, "Unrouted message from ~p: ~p", [Port, Msg])
+			log(S#state.verbosity, ?ERROR, "Unrouted message from ~p: ~p", [Port, Msg]);
+		Msg ->
+			log(S#state.verbosity, ?ERROR, "Unknown message: ~p", [Msg])
 	end.
 
 
